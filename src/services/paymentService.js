@@ -4,6 +4,7 @@ const repo = require('../repositories/paymentRepository');
 const paytm = require('../integrations/paytmClient');
 const sms = require('../integrations/smsClient');
 const { SignatureVerificationError } = require('../errors');
+const idempStore = require('../utils/idempotencyStore');
 
 function assertNumber(n, field) {
   if (typeof n !== 'number' || Number.isNaN(n)) {
@@ -74,7 +75,30 @@ async function handlePaymentWebhook(payload, context = {}) {
   const { idempotencyKey, ip, userAgent, method, path } = context || {};
   const securityContext = { idempotencyKey, ip, userAgent, method, path };
 
+  // Log received event
+  logger.info({
+    orderId,
+    status,
+    idempotencyKey,
+    ip,
+    userAgent,
+    method,
+    path,
+  }, 'webhook.received');
+
   verifyPaytmSignature({ orderId, status, amount }, checksum, securityContext);
+
+  // Log validated event
+  logger.info({ orderId, idempotencyKey }, 'webhook.validated');
+
+  // Idempotency enforcement
+  const derivedKey = idempotencyKey || `wh:${orderId}:${status}:${checksum}`;
+  if (idempStore.has(derivedKey)) {
+    const existing = repo.getByOrderId(orderId);
+    logger.info({ orderId, idempotencyKey, derivedKey }, 'webhook.idempotent.skip');
+    return existing || null;
+  }
+  idempStore.set(derivedKey);
 
   const existing = repo.getByOrderId(orderId);
   if (!existing) {
@@ -83,18 +107,19 @@ async function handlePaymentWebhook(payload, context = {}) {
     throw err;
   }
 
-  const updated = repo.updateStatus(existing.id, status);
+  const updated = updatePaymentStatus(existing.id, status);
 
   if (status === 'SUCCESS') {
     const message = `Payment of \u20B9${amount} successful. Payment ID: ${updated.id}`;
     try {
-      await sms.sendSMS({ to: updated.phone, message, senderId: config.sms.senderId }, config.sms.apiKey);
+      await sendSMSNotification(updated.phone, message);
     } catch (e) {
       logger.error({ err: e, paymentId: updated.id }, 'sms.send.failed');
     }
   }
 
-  logger.info({ orderId, status, paymentId: updated.id, idempotencyKey }, 'webhook.processed');
+  // Log applied event
+  logger.info({ orderId, status, paymentId: updated.id, idempotencyKey }, 'webhook.applied');
   return updated;
 }
 
