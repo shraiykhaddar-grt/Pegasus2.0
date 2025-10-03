@@ -2,6 +2,7 @@ const service = require('../../src/services/paymentService');
 const repo = require('../../src/repositories/paymentRepository');
 const paytm = require('../../src/integrations/paytmClient');
 const sms = require('../../src/integrations/smsClient');
+const { SignatureVerificationError } = require('../../src/errors');
 
 beforeEach(() => {
   repo.clearAll();
@@ -33,6 +34,15 @@ describe('paymentService', () => {
     const updated = await service.handlePaymentWebhook({ ...payload, checksum });
     expect(updated.status).toBe('SUCCESS');
     expect(spy).toHaveBeenCalled();
+  });
+
+  test('handlePaymentWebhook throws SignatureVerificationError on invalid checksum', async () => {
+    const payment = await service.createPayment({ amount: 100, currency: 'INR', customerId: 'C_BAD', phone: '7000000000' });
+    const payload = { orderId: payment.orderId, status: 'SUCCESS', amount: payment.amount };
+    const badChecksum = 'invalid_bad_checksum';
+    await expect(service.handlePaymentWebhook({ ...payload, checksum: badChecksum }))
+      .rejects
+      .toBeInstanceOf(SignatureVerificationError);
   });
 
   test('updatePaymentStatus updates to FAILED', async () => {

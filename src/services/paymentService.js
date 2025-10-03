@@ -3,6 +3,7 @@ const config = require('../config/config');
 const repo = require('../repositories/paymentRepository');
 const paytm = require('../integrations/paytmClient');
 const sms = require('../integrations/smsClient');
+const { SignatureVerificationError } = require('../errors');
 
 function assertNumber(n, field) {
   if (typeof n !== 'number' || Number.isNaN(n)) {
@@ -49,11 +50,20 @@ async function createPayment({ amount, currency = 'INR', customerId, phone }) {
   return payment;
 }
 
-function verifyPaytmSignature(payload, signature) {
-  return paytm.verifySignature(payload, signature);
+function verifyPaytmSignature(payload, signature, securityContext = {}) {
+  if (!signature) {
+    logger.warn({ securityContext, payloadMeta: { orderId: payload && payload.orderId } }, 'security.signature.missing');
+    throw new SignatureVerificationError('Missing signature/checksum');
+  }
+  const isValid = paytm.verifySignature(payload, signature);
+  if (!isValid) {
+    logger.warn({ securityContext, payloadMeta: { orderId: payload && payload.orderId } }, 'security.signature.mismatch');
+    throw new SignatureVerificationError('Invalid signature/checksum');
+  }
+  return true;
 }
 
-async function handlePaymentWebhook(payload) {
+async function handlePaymentWebhook(payload, context = {}) {
   const { orderId, status, amount, checksum } = payload || {};
   if (!orderId || !status || typeof amount !== 'number' || !checksum) {
     const err = new Error('Invalid webhook payload');
@@ -61,12 +71,10 @@ async function handlePaymentWebhook(payload) {
     throw err;
   }
 
-  const valid = verifyPaytmSignature({ orderId, status, amount }, checksum);
-  if (!valid) {
-    const err = new Error('Invalid signature');
-    err.status = 400;
-    throw err;
-  }
+  const { idempotencyKey, ip, userAgent, method, path } = context || {};
+  const securityContext = { idempotencyKey, ip, userAgent, method, path };
+
+  verifyPaytmSignature({ orderId, status, amount }, checksum, securityContext);
 
   const existing = repo.getByOrderId(orderId);
   if (!existing) {
@@ -86,7 +94,7 @@ async function handlePaymentWebhook(payload) {
     }
   }
 
-  logger.info({ orderId, status, paymentId: updated.id }, 'webhook.processed');
+  logger.info({ orderId, status, paymentId: updated.id, idempotencyKey }, 'webhook.processed');
   return updated;
 }
 

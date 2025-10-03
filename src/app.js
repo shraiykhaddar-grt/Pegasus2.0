@@ -18,8 +18,14 @@ app.use((req, res) => {
 app.use((err, req, res, next) => {
   const status = err.status || 500;
   const log = req && req.log ? req.log : logger;
-  log.error({ err, status }, 'request:error');
-  res.status(status).json({ error: err.message || 'Internal Server Error' });
+  const code = err.code || (status === 500 ? 'INTERNAL_ERROR' : 'APP_ERROR');
+  const response = {
+    error: err.message || 'Internal Server Error',
+    code,
+    requestId: req && req.id,
+  };
+  log.error({ err, status, code, requestId: response.requestId }, 'request:error');
+  res.status(status).json(response);
 });
 
 module.exports = app;

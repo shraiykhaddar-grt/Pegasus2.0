@@ -1,4 +1,5 @@
 const service = require('../services/paymentService');
+const { getIdempotencyKey } = require('../utils/idempotency');
 
 exports.createPayment = async (req, res, next) => {
   try {
@@ -32,7 +33,15 @@ exports.updatePaymentStatus = (req, res, next) => {
 
 exports.webhook = async (req, res, next) => {
   try {
-    const updated = await service.handlePaymentWebhook(req.body);
+    const idempotencyKey = getIdempotencyKey(req);
+    const context = {
+      idempotencyKey,
+      ip: req.ip || req.headers['x-forwarded-for'] || (req.connection && req.connection.remoteAddress),
+      userAgent: req.headers['user-agent'],
+      method: req.method,
+      path: req.originalUrl || req.url,
+    };
+    const updated = await service.handlePaymentWebhook(req.body, context);
     res.status(200).json({ success: true, payment: updated });
   } catch (err) {
     next(err);
