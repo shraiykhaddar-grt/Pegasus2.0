@@ -3,8 +3,9 @@ const config = require('../config/config');
 const repo = require('../repositories/paymentRepository');
 const paytm = require('../integrations/paytmClient');
 const sms = require('../integrations/smsClient');
-const { SignatureVerificationError } = require('../errors');
+const { SignatureVerificationError, ProviderError } = require('../errors');
 const idempStore = require('../utils/idempotencyStore');
+const { withRetry } = require('../utils/retry');
 
 function assertNumber(n, field) {
   if (typeof n !== 'number' || Number.isNaN(n)) {
@@ -29,13 +30,41 @@ async function createPayment({ amount, currency = 'INR', customerId, phone }) {
   assertString(phone, 'phone');
 
   const orderId = `ORDER_${Date.now().toString(36)}`;
-  const paytmOrder = await paytm.createOrder({
-    amount,
-    currency,
-    orderId,
-    customerId,
-    callbackUrl: config.paytm.callbackUrl,
-  });
+
+  logger.info({ amount, currency, customerId, orderId }, 'payment.create.request');
+
+  let paytmOrder;
+  try {
+    paytmOrder = await withRetry(
+      async (attempt) => {
+        try {
+          const res = await paytm.createOrder({ amount, currency, orderId, customerId, callbackUrl: config.paytm.callbackUrl });
+          if (!res || !res.orderId || !res.txnToken) {
+            throw new ProviderError('Invalid provider response', { details: { res }, retryable: false });
+          }
+          return res;
+        } catch (e) {
+          // normalize error to ProviderError
+          if (!(e instanceof ProviderError)) {
+            throw new ProviderError(e.message || 'Provider call failed', { details: { cause: e }, retryable: true });
+          }
+          throw e;
+        }
+      },
+      {
+        retries: 2,
+        minDelayMs: 100,
+        factor: 2,
+        maxDelayMs: 1000,
+        onRetry: (err, attempt, delay) => {
+          logger.warn({ orderId, attempt, delay, err }, 'payment.create.provider.retry');
+        },
+      }
+    );
+  } catch (err) {
+    logger.error({ orderId, err }, 'payment.create.failed');
+    throw err;
+  }
 
   const payment = repo.create({
     amount,
@@ -47,7 +76,7 @@ async function createPayment({ amount, currency = 'INR', customerId, phone }) {
     status: 'PENDING',
   });
 
-  logger.info({ paymentId: payment.id, orderId }, 'payment.created');
+  logger.info({ paymentId: payment.id, orderId }, 'payment.create.succeeded');
   return payment;
 }
 
@@ -143,7 +172,13 @@ async function sendSMSNotification(to, message) {
 
 function getPaymentById(id) {
   assertString(id, 'id');
-  return repo.getById(id);
+  const payment = repo.getById(id);
+  if (!payment) {
+    logger.info({ id }, 'payment.get.not_found');
+    return null;
+  }
+  logger.info({ id }, 'payment.get.succeeded');
+  return payment;
 }
 
 module.exports = {

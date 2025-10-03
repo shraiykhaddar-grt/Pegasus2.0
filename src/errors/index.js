@@ -18,7 +18,16 @@ class SignatureVerificationError extends AppError {
   }
 }
 
+class ProviderError extends AppError {
+  constructor(message = 'Provider error', options = {}) {
+    const { statusCode = 502, code = 'PROVIDER_ERROR', details, retryable = false } = options || {};
+    super(message, statusCode, code, details);
+    this.retryable = retryable;
+  }
+}
+
 module.exports = {
   AppError,
   SignatureVerificationError,
+  ProviderError,
 };
